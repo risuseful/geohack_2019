@@ -1,0 +1,289 @@
+# Prediction Module
+Author: ARIS, formerly CHAI, 2019
+
+
+**1. Read raw **
+
+Before we do anything, we clear the workspace:
+
+```{r}
+rm(list=ls())
+```
+
+To read in the data, we set this program to run on the following directory:
+
+```{r setup}
+library(knitr)
+# knitr::opts_knit$set(root.dir = "/data/home/apgcegeohack/notebooks/ChAI Akmal")
+# getwd()
+```
+
+```{r}
+d <- read.csv(file="Data_w_rocktype_rev1.csv", header=TRUE)
+# d <- read.csv(file="Log_W1_Comp.csv", header=TRUE)
+
+dm <- d[,3:7]
+
+rockType <- dm$ROCK_TYPE_1
+
+head(dm)
+```
+
+
+
+
+**2. Data Preprocessing**
+
+2.1. Remove columns with mostly missing values
+
+```{r}
+# replace "-999.25" with NA
+dm[dm == -999.25] <- NA
+
+max_num_na <- round(0.6*nrow(dm),0)
+dm <- dm[,!colSums(is.na(dm)) >= max_num_na]
+
+dm <- cbind(dm, rockType)
+
+names(dm)
+```
+
+2.2. Remove rows missing values
+
+```{r}
+dm <- na.omit(dm)
+
+rockType <- dm$rockType
+
+nrow(dm)
+```
+
+2.3. Removing columns with mostly zeros
+
+```{r}
+min_num_zeros <- round(nrow(dm)*0.9,0)
+dm <- dm[, colSums(dm != 0) > min_num_zeros]
+
+
+                
+names(dm)
+```
+
+2.4. Removing columns with low standard deviations
+
+```{r}
+max_sd <- 1
+dm <- dm[,!(apply(dm,2,sd) < max_sd)]
+
+names(dm)
+```
+
+
+2.5. Removing linearly dependent columns
+
+```{r}
+dm <- dm[, qr(dm)$pivot[seq_len(qr(dm)$rank)]]
+
+names(dm)
+```
+
+
+**3. Training and test set**
+
+3.1. Stratified sampling
+
+```{r}
+colnames(dm) <- c("GR", "DT", "NPHI", "RHOB", "rockType")
+
+dm$rockType <- as.factor(round(dm$rockType,0))
+
+frac_tr <- 0.66 # fraction of data for training
+smp_size <- floor(frac_tr * nrow(dm)) # sample size
+
+# report unique vector
+uniq_tab <- as.data.frame(table(dm$rockType))
+n_uniq <- nrow(uniq_tab) # number of unique vals
+
+# required sample size for each unique response
+smp_size_cls <- round(uniq_tab[,2] / sum(uniq_tab[,2])*smp_size,0)
+
+# bind required individual sample size with uniq_tab
+uniq_tab <- cbind(uniq_tab,smp_size_cls)
+
+uniq_tab
+```
+
+3.2. Training and test set generation
+
+```{r}
+for (i in 1:nrow(uniq_tab))
+{
+  # create dataset based on a single class
+  dm_sub <- dm[dm$rockType==uniq_tab$Var1[i],]
+  
+  # sample the rows in dm_sub
+  dm_sub <- dm_sub[sample(nrow(dm_sub)),]
+  
+  # percent of sample size
+  smp_size_sub <- floor(uniq_tab$smp_size_cls[i]/uniq_tab$Freq[i] * nrow(dm_sub))
+  
+  # set indices
+  train_ind <- sample(seq_len(nrow(dm_sub)), size = smp_size_sub)
+  
+  train <- dm_sub[train_ind,]
+  test <- dm_sub[-train_ind,]
+  
+  if(i==1)
+  {
+    training_set <- train
+    test_set <- test
+  } else {
+    training_set <- rbind(training_set, train)
+    test_set <- rbind(test_set, test)
+  }
+  
+  # # take the first n set of rows based on uniq_tab$smp_size_cls
+  # numSamp <- uniq_tab$smp_size_cls[i]
+  # dm_sub_tr <- dm_sub[1:numSamp,] # train
+  # dm_sub_ts <- dm_sub[numSamp:nrow(dm_sub),] # test
+  # 
+  # if(i==1)
+  # {
+  #   training_set <- dm_sub_tr
+  #   test_set <- dm_sub_ts
+  # } else {
+  #   training_set <- rbind(training_set, dm_sub_tr)
+  #   test_set <- rbind(test_set, dm_sub_ts)
+  # }
+  
+}
+
+nrow(training_set)
+nrow(test_set)
+nrow(dm)
+```
+
+**4. Random Forests**
+
+4.1. Training
+
+```{r}
+library(randomForest)
+
+fit <- randomForest(rockType ~ ., data=training_set, ntree=1000 )
+```
+
+
+4.2. Final misclassification rate
+
+```{r}
+# predict test_set with randomForest
+fit.pred <- predict(fit, test_set)
+
+# show classification performance
+table(observed = test_set$rockType, predicted = fit.pred)
+
+# confusion matrix report
+library(e1071)
+library(caTools)
+library(caret)
+cfm <- confusionMatrix(fit.pred, test_set$rockType)
+cfm
+```
+
+4.4. Variable Importance
+
+```{r}
+varImpPlot(fit,type=2)
+```
+
+4.5. Predicting data with unknown rockType
+
+```{r}
+# read new test set (without rockType)
+new_test_set <- read.csv(file="Data_wo_rocktype_rev1.csv", header=TRUE, na.strings=c("","NA"))
+
+dtes <- new_test_set[,3:6]
+dtes <- na.omit(dtes)
+
+# convert all values to numerics
+# note: apparantly some of the vals are factors
+dtes2 <- cbind(as.numeric(dtes$GR), as.numeric(dtes$DT), as.numeric(dtes$NPHI), as.numeric(dtes$RHOB))
+
+# give column names
+dtes2 <- as.data.frame(dtes2)
+colnames(dtes2) <- c("GR", "DT", "NPHI", "RHOB")
+names(dtes2)
+```
+
+We can now try to predict,
+
+```{r}
+# remove rows with missing values
+# dtes_wo_na <- na.omit(dtes2)
+
+# predict test_set with randomForest
+fit2.pred <- predict(fit, dtes2)
+```
+
+We will try to compile everything,
+
+```{r}
+# compile data_2: dtes2 with additional empty column that represents unavailable rock type
+data_2 <- cbind(dtes2, c(rep(999,nrow(dtes2))), fit2.pred)
+colnames(data_2) <- c("GR", "DT", "NPHI", "RHOB", "rockType_orig", "rockType_pred")
+
+# predict rock type for entire data in dm
+fit3.pred <- predict(fit, dm)
+
+# compile data_1: bind dm with fit3.pred
+data_1 <- cbind(dm, fit3.pred)
+colnames(data_1) <- c("GR", "DT", "NPHI", "RHOB", "rockType_orig", "rockType_pred")
+
+# write data to file: all_results.csv
+data_2 <- cbind(data_2, rep("unknown_rocktype",nrow(data_2)))
+colnames(data_2) <- c("GR", "DT", "NPHI", "RHOB", "rockType_orig", "rockType_pred", "rockType_status")
+data_1 <- cbind(data_1, rep("known_rocktype",nrow(data_1)))
+colnames(data_1) <- c("GR", "DT", "NPHI", "RHOB", "rockType_orig", "rockType_pred", "rockType_status")
+write.csv(file="all_results.csv", rbind(data_1, data_2))
+```
+
+**5. Deep Learning **
+
+5.1. Pre-prepare training and test set
+
+We first create the following:
+* train_input
+* train_label
+* test_input
+* test_label
+
+```{r}
+train_input <- training_set[,1:4]
+train_label <- training_set[,5]
+test_input <- test_set[,1:4]
+test_label <- test_set[,5]
+```
+
+5.2. Data normalization
+
+```{r}
+library(keras)
+
+train_images <- scale(train_input)
+train_labels <- to_categorical(train_label)
+
+test_images <- scale(test_input)
+test_labels <- to_categorical(test_label)
+
+
+
+```
+
+5.3. Setting up layers
+
+5.4. Compiling model
+
+5.5. Training the model
+
+5.6. Compile accuracy
